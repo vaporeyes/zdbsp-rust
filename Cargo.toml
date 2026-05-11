@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["zdbsp-lib", "zdbsp-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/ZDoom/zdbsp"
+description = "Rust port of ZDBSP, ZDoom's stand-alone node builder"
+
+[workspace.dependencies]
+zdbsp-lib = { path = "zdbsp-lib" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
