@@ -5,3 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Node builder library for Doom-format WADs (Rust port of ZDBSP)"
+
+[dependencies]
+thiserror = "1"
