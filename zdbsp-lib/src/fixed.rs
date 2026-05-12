@@ -24,14 +24,21 @@ pub type Angle = u32;
 
 /// Direct port of `PointToAngle` from main.cpp:686.
 ///
-/// `atan2(y, x) * 2^30 / pi`, truncated to `i32`, reinterpreted as `u32`, then shifted
-/// left one bit. The intermediate `f64 → i32` cast is safe because `|dbam| <= 2^30 < 2^31`.
+/// `atan2(y, x) * 2^30 / pi`, then `(uint32_t)dbam << 1`. The C++ cast of a possibly-
+/// negative double to `uint32_t` is implementation-defined; on Apple Silicon (which is
+/// our baseline host) clang emits `fcvtzu`, which saturates negative values to zero.
+/// Rust's `as u32` happens to have identical saturating semantics, so we use it directly.
+///
+/// This is byte-identical to the baseline produced by clang on aarch64-apple-darwin.
+/// A baseline built with a compiler that uses 2's-complement wrap (e.g. x86_64 cvttsd2si)
+/// would produce a different `Angle` for negative inputs; that machine would need a
+/// different code path or a cross-compiled baseline to match.
 #[inline]
 pub fn point_to_angle(x: Fixed, y: Fixed) -> Angle {
     let ang = (y as f64).atan2(x as f64);
     let rad2bam = (1i64 << 30) as f64 / std::f64::consts::PI;
     let dbam = ang * rad2bam;
-    ((dbam as i32) as u32) << 1
+    (dbam as u32) << 1
 }
 
 #[cfg(test)]

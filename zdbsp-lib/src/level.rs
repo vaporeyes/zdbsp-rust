@@ -147,6 +147,58 @@ pub struct IntVertex {
     pub props: Vec<UdmfKey>,
 }
 
+/// Extended subsector (32-bit indices). Output of the node builder; consumed by the
+/// compressed-node writers. Mirrors `MapSubsectorEx` in doomdata.h.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MapSubsectorEx {
+    pub numlines: u32,
+    pub firstline: u32,
+}
+
+/// Extended seg with 32-bit vertex indices. Output of the non-GL extraction path.
+/// Mirrors `MapSegEx` in doomdata.h.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MapSegEx {
+    pub v1: u32,
+    pub v2: u32,
+    pub angle: u16,
+    pub linedef: u16,
+    pub side: i16,
+    pub offset: i16,
+}
+
+/// Extended BSP node with full-precision fixed-point splitter coords. Bounding boxes
+/// are stored in `short` (map units) here because that's what the wad writer emits
+/// for the classic NODES lump format. Mirrors `MapNodeEx` in doomdata.h.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MapNodeEx {
+    pub x: Fixed,
+    pub y: Fixed,
+    pub dx: Fixed,
+    pub dy: Fixed,
+    pub bbox: [[i16; 4]; 2],
+    pub children: [u32; 2],
+}
+
+/// Extended GL seg, 32-bit indices. Mirrors `MapSegGLEx` in doomdata.h.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MapSegGlEx {
+    pub v1: u32,
+    pub v2: u32,
+    pub linedef: u32,
+    pub side: u16,
+    pub partner: u32,
+}
+
+/// Subsector flag bit on a child reference. Same value as `NFX_SUBSECTOR` in workdata.
+pub const OUT_NFX_SUBSECTOR: u32 = 0x80000000;
+
+/// BBox indices used throughout the node builder and output structures.
+pub const BOX_TOP: usize = 0;
+pub const BOX_BOTTOM: usize = 1;
+pub const BOX_LEFT: usize = 2;
+pub const BOX_RIGHT: usize = 3;
+
 /// Loaded map. Owns the geometry vectors and (later) the node-builder output.
 #[derive(Debug, Default)]
 pub struct Level {

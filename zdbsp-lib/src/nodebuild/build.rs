@@ -40,20 +40,20 @@ impl<'a> NodeBuilder<'a> {
         let max_segs = self.options.max_segs.max(1);
         let skip = (count as i32) / max_segs;
 
+        // Mirrors the chained-OR splitter cascade in nodebuild.cpp:87-91. Note the
+        // subtle asymmetry on the *fourth* SelectSplitter call: the C++ test is bare
+        // truthiness (no `> 0`), so a `-1` return there is accepted as "yes, split".
         let split_decision = {
-            // Try `(step=skip, nosplit=true)` first.
             let selstat = self.select_splitter(set, &mut node, &mut splitseg, skip, true);
             if selstat > 0 {
                 true
             } else if skip > 0 && self.select_splitter(set, &mut node, &mut splitseg, 1, true) > 0 {
                 true
             } else if selstat < 0 {
-                // "There were possible splitters but they all split lines we wanted to
-                // keep". Retry without the nosplit constraint.
                 if self.select_splitter(set, &mut node, &mut splitseg, skip, false) > 0 {
                     true
                 } else if skip > 0
-                    && self.select_splitter(set, &mut node, &mut splitseg, 1, false) > 0
+                    && self.select_splitter(set, &mut node, &mut splitseg, 1, false) != 0
                 {
                     true
                 } else {
@@ -140,13 +140,11 @@ impl<'a> NodeBuilder<'a> {
             }
             let num_lines = self.seg_list.len() as u32 - first_line;
 
-            // Sort by linedef for "special effects". The C++ uses qsort (unstable) here;
-            // we use stable `sort_by` so ties retain insertion order. For non-GL output
-            // this matches because segs from the same subsector with the same linedef
-            // are not generated.
+            // The C++ uses libc `qsort` here. qsort is unstable, and for byte-identical
+            // output we need the *exact* permutation of ties that qsort produces. We
+            // route through libc's qsort via FFI so the result matches whatever was
+            // linked against the C++ baseline on this host.
             let slice = &mut self.seg_list[first_line as usize..];
-            // Capture the comparator data (segs[]) by value-copy into a local closure.
-            // Cannot borrow `self.segs` and `self.seg_list` simultaneously, so snapshot.
             let segs_snap: Vec<(i32, i32, i32)> = slice
                 .iter()
                 .map(|p| {
@@ -154,12 +152,11 @@ impl<'a> NodeBuilder<'a> {
                     (s.linedef, s.frontsector, s.backsector)
                 })
                 .collect();
-            let mut indices: Vec<usize> = (0..slice.len()).collect();
-            indices.sort_by(|&a, &b| sort_segs_cmp(segs_snap[a], segs_snap[b]));
-            // Apply the permutation back to seg_list.
+            let mut indices: Vec<u32> = (0..slice.len() as u32).collect();
+            libc_qsort_indices(&mut indices, &segs_snap);
             let original: Vec<USegPtr> = slice.to_vec();
             for (out_pos, &orig_pos) in indices.iter().enumerate() {
-                slice[out_pos] = original[orig_pos];
+                slice[out_pos] = original[orig_pos as usize];
             }
 
             self.subsectors.push(Subsector {
@@ -490,11 +487,15 @@ impl<'a> NodeBuilder<'a> {
                     let frac = self.intercept_vector(node, &seg_snap);
                     let v1 = self.vertices[seg_snap.v1 as usize];
                     let v2 = self.vertices[seg_snap.v2 as usize];
-                    let nx = v1.x as f64 + frac * (v2.x as f64 - v1.x as f64);
-                    let ny = v1.y as f64 + frac * (v2.y as f64 - v1.y as f64);
+                    // Match the C++ truncation order in nodebuild.cpp:800-803:
+                    // truncate `frac * delta` to int FIRST, then add to v1. Doing the
+                    // addition in f64 and truncating once would round differently when
+                    // the delta is negative and v1 is positive.
+                    let dx = (frac * (v2.x as f64 - v1.x as f64)) as Fixed;
+                    let dy = (frac * (v2.y as f64 - v1.y as f64)) as Fixed;
                     let newvert = PrivVert {
-                        x: nx as Fixed,
-                        y: ny as Fixed,
+                        x: v1.x.wrapping_add(dx),
+                        y: v1.y.wrapping_add(dy),
                         segs: 0,
                         segs2: 0,
                         index: 0,
@@ -577,51 +578,55 @@ impl<'a> NodeBuilder<'a> {
         *count1 = c1;
     }
 
-    // ---- GL stubs (filled in Phase 5) ---------------------------------------------
+    // GL-only methods (AddIntersection, FixSplitSharers, AddMinisegs, AddMiniseg,
+    // CheckLoopStart, CheckLoopEnd, CheckSubsectorOverlappingSegs) live in gl.rs.
+}
 
-    pub(crate) fn check_subsector_overlapping_segs(
-        &mut self,
-        _set: u32,
-        _node: &mut Node,
-        _splitseg: &mut u32,
-    ) -> bool {
-        unimplemented!("GL nodes land in Phase 5; this code path requires gl_nodes=false");
-    }
+// FFI to libc qsort. The thread-local pointer holds the (linedef, front, back) data
+// the comparator looks up by index. Required because qsort's C comparator takes raw
+// pointers without a userdata pointer.
+thread_local! {
+    static QSORT_CTX: std::cell::Cell<*const Vec<(i32, i32, i32)>> = std::cell::Cell::new(std::ptr::null());
+}
 
-    pub(crate) fn add_intersection(&mut self, _node: &Node, _vertex: i32) -> f64 {
-        unimplemented!("GL nodes land in Phase 5; this code path requires gl_nodes=false");
-    }
-
-    pub(crate) fn add_minisegs(
-        &mut self,
-        _node: &Node,
-        _splitseg: u32,
-        _outset0: &mut u32,
-        _outset1: &mut u32,
-    ) {
-        unimplemented!("GL nodes land in Phase 5; this code path requires gl_nodes=false");
-    }
-
-    pub(crate) fn add_miniseg(
-        &mut self,
-        _v1: i32,
-        _v2: i32,
-        _partner: u32,
-        _seg1: u32,
-        _splitseg: u32,
-    ) -> u32 {
-        unimplemented!("GL nodes land in Phase 5; this code path requires gl_nodes=false");
-    }
-
-    /// FixSplitSharers (nodebuild_gl.cpp:64). Body is a no-op when `split_sharers` is
-    /// empty, which it always is for non-GL builds; we only panic if someone populates
-    /// it ahead of Phase 5.
-    pub(crate) fn fix_split_sharers(&mut self) {
-        if self.split_sharers.is_empty() {
-            return;
+extern "C" fn qsort_cmp(a: *const std::ffi::c_void, b: *const std::ffi::c_void) -> i32 {
+    let av = unsafe { *(a as *const u32) } as usize;
+    let bv = unsafe { *(b as *const u32) } as usize;
+    QSORT_CTX.with(|c| {
+        let ctx = c.get();
+        let snap: &Vec<(i32, i32, i32)> = unsafe { &*ctx };
+        let cmp = sort_segs_cmp(snap[av], snap[bv]);
+        match cmp {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
         }
-        unimplemented!("FixSplitSharers requires the GL helpers from Phase 5");
+    })
+}
+
+extern "C" {
+    fn qsort(
+        base: *mut std::ffi::c_void,
+        nel: usize,
+        width: usize,
+        compar: extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> i32,
+    );
+}
+
+fn libc_qsort_indices(indices: &mut [u32], snap: &Vec<(i32, i32, i32)>) {
+    if indices.len() <= 1 {
+        return;
     }
+    QSORT_CTX.with(|c| c.set(snap as *const _));
+    unsafe {
+        qsort(
+            indices.as_mut_ptr() as *mut std::ffi::c_void,
+            indices.len(),
+            std::mem::size_of::<u32>(),
+            qsort_cmp,
+        );
+    }
+    QSORT_CTX.with(|c| c.set(std::ptr::null()));
 }
 
 // `SortSegs` comparator from nodebuild.cpp:224, lifted into a free function operating
