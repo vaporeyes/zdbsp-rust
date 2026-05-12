@@ -35,8 +35,8 @@ pub enum ProcessorError {
     Io(#[from] io::Error),
     #[error("required lump {0} missing from map")]
     MissingLump(&'static str),
-    #[error("UDMF maps are not yet supported")]
-    UdmfNotSupported,
+    #[error("UDMF parse error: {0}")]
+    Udmf(#[from] crate::udmf::UdmfError),
     #[error("lump {name} has size {size} which is not a multiple of {record}")]
     BadLumpSize {
         name: &'static str,
@@ -70,13 +70,22 @@ impl Processor {
             MapFormat::Doom
         };
 
+        let mut level = Level::default();
+
         if format == MapFormat::Udmf {
-            return Err(ProcessorError::UdmfNotSupported);
+            // TEXTMAP lives at `map_lump + 1`. Read its bytes and parse.
+            let textmap_idx = map_lump + 1;
+            let bytes = wad.read_lump(textmap_idx)?;
+            crate::udmf::parse_text_map(&bytes, &mut level)?;
+            return Ok(Self {
+                format,
+                map_lump,
+                map_name,
+                level,
+            });
         }
 
         let extended = format == MapFormat::Hexen;
-        let mut level = Level::default();
-
         load_things(wad, map_lump, extended, &mut level)?;
         load_vertices(wad, map_lump, &mut level)?;
         load_lines(wad, map_lump, extended, &mut level)?;

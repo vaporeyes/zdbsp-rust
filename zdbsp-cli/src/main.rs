@@ -22,6 +22,7 @@ struct Args {
     compress_nodes: bool,
     compress_gl_nodes: bool,
     force_compression: bool,
+    write_comments: bool,
     reject_mode: RejectMode,
     blockmap_mode: BlockmapMode,
     max_segs: Option<i32>,
@@ -90,6 +91,8 @@ fn parse_args() -> Result<Args, String> {
             a.blockmap_mode = BlockmapMode::Create0;
         } else if arg == "-P" || arg == "--no-polyobjs" {
             a.check_polyobjs = false;
+        } else if arg == "-c" || arg == "--comments" {
+            a.write_comments = true;
         } else if let Some(rest) = arg.strip_prefix("-p") {
             let v = if rest.is_empty() {
                 it.next().ok_or("-p expects a number")?
@@ -155,6 +158,7 @@ fn run(args: Args) -> Result<(), String> {
         compress_nodes: args.compress_nodes,
         compress_gl_nodes: args.compress_gl_nodes,
         force_compression: args.force_compression,
+        write_comments: args.write_comments,
     };
 
     // Build-time tunables for the NodeBuilder. None means "leave default".
@@ -183,17 +187,15 @@ fn run(args: Args) -> Result<(), String> {
         };
         if is_map && matches_filter {
             let map_name = reader.lump_name(lump).into_owned();
+            eprintln!("----{map_name}----");
             if reader.is_udmf(lump) {
-                eprintln!("Skipping {map_name}: UDMF not supported in this build");
-                // Copy the map block through unchanged.
-                let after = reader.lump_after_map(lump);
-                for l in lump..after {
-                    out.copy_lump(&mut reader, l).map_err(|e| format!("copy {l}: {e}"))?;
-                }
-                lump = after;
+                let processor = Processor::load(&mut reader, lump, args.no_prune)
+                    .map_err(|e| format!("load {map_name}: {e}"))?;
+                writer::write_udmf_map(&mut out, &mut reader, lump, &processor.level, opts)
+                    .map_err(|e| format!("write {map_name}: {e}"))?;
+                lump = reader.lump_after_map(lump);
                 continue;
             }
-            eprintln!("----{map_name}----");
             let mut processor = Processor::load(&mut reader, lump, args.no_prune)
                 .map_err(|e| format!("load {map_name}: {e}"))?;
 

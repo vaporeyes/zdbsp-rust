@@ -11,7 +11,7 @@ use crate::nodebuild::extract::NodeOutput;
 use crate::nodebuild::extract_gl::GlNodeOutput;
 use crate::processor::MapFormat;
 use crate::wad::{WadReader, WadWriter};
-use crate::{writer_compressed as wcomp, writer_gl as wgl};
+use crate::{udmf, writer_compressed as wcomp, writer_gl as wgl};
 
 /// `NF_SUBSECTOR` flag used in the classic 16-bit NODES lump child references. Matches
 /// `doomdata.h:160`.
@@ -41,6 +41,13 @@ pub enum BlockmapMode {
     Create0,
 }
 
+/// Whether the UDMF writer should annotate each block with `// <index>` comments.
+/// Matches the C++ `-c / --comments` flag.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UdmfWriterOptions {
+    pub write_comments: bool,
+}
+
 /// Per-map writer options. Names follow the C++ `main.cpp` globals.
 #[derive(Debug, Clone, Copy)]
 pub struct WriterOptions {
@@ -56,6 +63,8 @@ pub struct WriterOptions {
     /// `-z` / `-Z`: when extended output is selected, force ZLib compression (ZNOD).
     /// `-X` clears this so the extended output stays uncompressed (XNOD).
     pub force_compression: bool,
+    /// UDMF-only: write `// <idx>` annotations into each block.
+    pub write_comments: bool,
 }
 
 impl Default for WriterOptions {
@@ -68,8 +77,45 @@ impl Default for WriterOptions {
             compress_nodes: false,
             compress_gl_nodes: false,
             force_compression: false,
+            write_comments: false,
         }
     }
+}
+
+/// Emit a UDMF-format map to `out`. Mirrors `FProcessor::WriteUDMF` (processor_udmf.cpp:587)
+/// minus the ZNODES write — the GL build is performed by the caller and any extended
+/// node lumps must be written separately. This intentionally keeps Phase 6b focused on
+/// text-map I/O; ZNODES emission for UDMF lands with Phase 6c (-x / ConformNodes).
+pub fn write_udmf_map(
+    out: &mut WadWriter,
+    wad: &mut WadReader,
+    map_lump: i32,
+    level: &Level,
+    opts: WriterOptions,
+) -> io::Result<()> {
+    out.copy_lump(wad, map_lump)?;
+    udmf::write_text_map(out, level, opts.write_comments)?;
+
+    // Walk forward from TEXTMAP+1 until ENDMAP, copying lumps that aren't node-builder
+    // outputs (those we'd regenerate). For Phase 6b we don't yet regenerate ZNODES, so
+    // any existing ZNODES from the input is also dropped — pure rewrite.
+    let mut idx = map_lump + 2;
+    let max = wad.num_lumps();
+    while idx < max {
+        let name = wad.lump_name(idx).into_owned();
+        if name.eq_ignore_ascii_case("ENDMAP") {
+            break;
+        }
+        let drop = name.eq_ignore_ascii_case("ZNODES")
+            || name.eq_ignore_ascii_case("BLOCKMAP")
+            || name.eq_ignore_ascii_case("REJECT");
+        if !drop {
+            out.copy_lump(wad, idx)?;
+        }
+        idx += 1;
+    }
+    out.create_label("ENDMAP")?;
+    Ok(())
 }
 
 /// Emit a fully-built map to `out`. Mirrors `FProcessor::Write` from processor.cpp:511.
