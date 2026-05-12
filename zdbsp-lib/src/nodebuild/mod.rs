@@ -5,12 +5,35 @@
 use crate::fixed::Fixed;
 use crate::workdata::{Node, Subsector};
 
+pub mod build;
 pub mod classify;
 pub mod events;
 pub mod types;
 pub mod util;
 
 pub use types::*;
+
+/// Tunable build parameters. The C++ uses extern globals (`MaxSegs`, `SplitCost`,
+/// `AAPreference`) defined in main.cpp; defaults match those.
+#[derive(Debug, Clone, Copy)]
+pub struct BuildOptions {
+    /// Maximum segs per node — used to throttle SelectSplitter on huge maps.
+    pub max_segs: i32,
+    /// Score penalty per split when evaluating splitters.
+    pub split_cost: i32,
+    /// Axis-aligned splitter preference weight.
+    pub aa_preference: i32,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self {
+            max_segs: 64,
+            split_cost: 8,
+            aa_preference: 16,
+        }
+    }
+}
 
 /// Points within this distance of a line are considered to lie on the line. Squared
 /// against `s_num^2 / (dx^2 + dy^2)` in `point_on_side`. Matches nodebuild.h:262.
@@ -89,6 +112,8 @@ pub struct NodeBuilder<'a> {
 
     /// Progress meter state.
     pub(crate) segs_stuffed: i32,
+    /// Tunable build options.
+    pub options: BuildOptions,
 
     // Vertex map (FVertexMap). Populated after FindMapBounds via `init_vertex_map`.
     pub(crate) vmap_min_x: Fixed,
@@ -140,6 +165,7 @@ impl<'a> NodeBuilder<'a> {
             poly_starts,
             poly_anchors,
             segs_stuffed: 0,
+            options: BuildOptions::default(),
             vmap_min_x: 0,
             vmap_min_y: 0,
             vmap_max_x: 0,
@@ -153,6 +179,56 @@ impl<'a> NodeBuilder<'a> {
     /// Stub for the public "get final vertex array" entry point. Phase 4e fills this in.
     pub fn get_vertices(&self) -> Vec<crate::level::WideVertex> {
         Vec::new()
+    }
+
+    /// Read-only access to the BSP nodes produced by [`build`](Self::build).
+    pub fn nodes(&self) -> &[Node] {
+        &self.nodes
+    }
+
+    /// Read-only access to the subsectors produced by [`build`](Self::build).
+    pub fn subsectors(&self) -> &[Subsector] {
+        &self.subsectors
+    }
+
+    /// Flat list of seg references emitted by `create_subsectors_for_real`.
+    pub fn seg_list(&self) -> &[USegPtr] {
+        &self.seg_list
+    }
+
+    /// Internal seg array (with mid-build splits applied).
+    pub fn segs(&self) -> &[PrivSeg] {
+        &self.segs
+    }
+
+    /// Internal vertex array (initial + intersection vertices).
+    pub fn priv_vertices(&self) -> &[PrivVert] {
+        &self.vertices
+    }
+
+    /// Run the full build pipeline. Mirrors `FNodeBuilder::FNodeBuilder` from
+    /// nodebuild.cpp:42 followed by `BuildTree`:
+    ///   init_vertex_map → find_used_vertices → make_segs_from_sides →
+    ///   find_poly_containers → group_seg_planes → build_tree.
+    pub fn build(&mut self) {
+        let (minx, miny, maxx, maxy) = (
+            self.level.min_x,
+            self.level.min_y,
+            self.level.max_x,
+            self.level.max_y,
+        );
+        self.init_vertex_map(minx, miny, maxx, maxy);
+
+        // The C++ passes `Level.Vertices` directly through to FindUsedVertices, which
+        // both reads from it and writes new indices back into `Level.Lines`. We snapshot
+        // the source vertex list to break the borrow with `self.level.lines`.
+        let oldverts = self.level.vertices.clone();
+        self.find_used_vertices(&oldverts);
+
+        self.make_segs_from_sides();
+        self.find_poly_containers();
+        self.group_seg_planes();
+        self.build_tree();
     }
 }
 
