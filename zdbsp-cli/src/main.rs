@@ -18,16 +18,22 @@ struct Args {
     no_prune: bool,
     build_nodes: bool,
     build_gl_nodes: bool,
+    check_polyobjs: bool,
     compress_nodes: bool,
     compress_gl_nodes: bool,
+    force_compression: bool,
     reject_mode: RejectMode,
     blockmap_mode: BlockmapMode,
+    max_segs: Option<i32>,
+    split_cost: Option<i32>,
+    aa_preference: Option<i32>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         output: PathBuf::from("tmp.wad"),
         build_nodes: true,
+        check_polyobjs: true,
         ..Args::default()
     };
 
@@ -53,19 +59,70 @@ fn parse_args() -> Result<Args, String> {
         } else if arg == "-N" || arg == "--no-nodes" {
             a.build_nodes = false;
         } else if arg == "-g" || arg == "--gl" {
+            // C++ main.cpp:377-380.
             a.build_gl_nodes = true;
         } else if arg == "-z" || arg == "--compress" {
+            // C++ main.cpp:390-394: compress both, force ZLib output.
             a.compress_nodes = true;
-        } else if arg == "-Z" || arg == "--compress-normal" {
             a.compress_gl_nodes = true;
+            a.force_compression = true;
+        } else if arg == "-Z" || arg == "--compress-normal" {
+            // C++ main.cpp:395-399: compress only regular NODES.
+            a.compress_nodes = true;
+            a.compress_gl_nodes = false;
+            a.force_compression = true;
+        } else if arg == "-X" || arg == "--extended" {
+            // C++ main.cpp:385-389: extended uncompressed (XNOD/XGLN).
+            a.compress_nodes = true;
+            a.compress_gl_nodes = true;
+            a.force_compression = false;
         } else if arg == "-q" || arg == "--no-prune" {
             a.no_prune = true;
         } else if arg == "-r" || arg == "--empty-reject" {
             a.reject_mode = RejectMode::Create0;
         } else if arg == "-R" || arg == "--zero-reject" {
             a.reject_mode = RejectMode::CreateZeroes;
+        } else if arg == "-e" || arg == "--full-reject" {
+            a.reject_mode = RejectMode::Rebuild;
+        } else if arg == "-E" || arg == "--no-reject" {
+            a.reject_mode = RejectMode::DontTouch;
         } else if arg == "-b" || arg == "--empty-blockmap" {
             a.blockmap_mode = BlockmapMode::Create0;
+        } else if arg == "-P" || arg == "--no-polyobjs" {
+            a.check_polyobjs = false;
+        } else if let Some(rest) = arg.strip_prefix("-p") {
+            let v = if rest.is_empty() {
+                it.next().ok_or("-p expects a number")?
+            } else {
+                rest.to_string()
+            };
+            let n: i32 = v.parse().map_err(|_| "-p: not a number")?;
+            a.max_segs = Some(n.max(3));
+        } else if let Some(rest) = arg.strip_prefix("--partition=") {
+            let n: i32 = rest.parse().map_err(|_| "--partition: not a number")?;
+            a.max_segs = Some(n.max(3));
+        } else if let Some(rest) = arg.strip_prefix("-s") {
+            let v = if rest.is_empty() {
+                it.next().ok_or("-s expects a number")?
+            } else {
+                rest.to_string()
+            };
+            let n: i32 = v.parse().map_err(|_| "-s: not a number")?;
+            a.split_cost = Some(n.max(1));
+        } else if let Some(rest) = arg.strip_prefix("--split-cost=") {
+            let n: i32 = rest.parse().map_err(|_| "--split-cost: not a number")?;
+            a.split_cost = Some(n.max(1));
+        } else if let Some(rest) = arg.strip_prefix("-d") {
+            let v = if rest.is_empty() {
+                it.next().ok_or("-d expects a number")?
+            } else {
+                rest.to_string()
+            };
+            let n: i32 = v.parse().map_err(|_| "-d: not a number")?;
+            a.aa_preference = Some(n.max(1));
+        } else if let Some(rest) = arg.strip_prefix("--diagonal-cost=") {
+            let n: i32 = rest.parse().map_err(|_| "--diagonal-cost: not a number")?;
+            a.aa_preference = Some(n.max(1));
         } else if arg == "--version" || arg == "-V" {
             println!("ZDBSP-rust 0.1.0");
             std::process::exit(0);
@@ -97,6 +154,14 @@ fn run(args: Args) -> Result<(), String> {
         build_gl_nodes: args.build_gl_nodes,
         compress_nodes: args.compress_nodes,
         compress_gl_nodes: args.compress_gl_nodes,
+        force_compression: args.force_compression,
+    };
+
+    // Build-time tunables for the NodeBuilder. None means "leave default".
+    let build_opts = zdbsp_lib::nodebuild::BuildOptions {
+        max_segs: args.max_segs.unwrap_or(64),
+        split_cost: args.split_cost.unwrap_or(8),
+        aa_preference: args.aa_preference.unwrap_or(16),
     };
 
     let mut reader = WadReader::open(input).map_err(|e| format!("open input: {e}"))?;
@@ -135,8 +200,13 @@ fn run(args: Args) -> Result<(), String> {
             // GL build (optional). Mirrors processor.cpp:617-636: build GL first, then
             // throw away the builder and load again for the regular build.
             let (gl_out, gl_num_org) = if args.build_nodes && args.build_gl_nodes {
-                let (starts, anchors) = collect_poly_spots(&processor.level);
+                let (starts, anchors) = if args.check_polyobjs {
+                    collect_poly_spots(&processor.level)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
                 let mut nb = NodeBuilder::new(&mut processor.level, starts, anchors, &map_name, true);
+                nb.options = build_opts;
                 nb.build();
                 let num_org = nb.initial_vertex_count() as u32;
                 let extracted = nb.extract_gl();
@@ -154,8 +224,13 @@ fn run(args: Args) -> Result<(), String> {
             }
 
             let (nodes, num_org_verts) = if args.build_nodes {
-                let (starts, anchors) = collect_poly_spots(&processor.level);
+                let (starts, anchors) = if args.check_polyobjs {
+                    collect_poly_spots(&processor.level)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
                 let mut nb = NodeBuilder::new(&mut processor.level, starts, anchors, &map_name, false);
+                nb.options = build_opts;
                 nb.build();
                 let num_org = nb.initial_vertex_count() as u32;
                 let out = nb.extract_nodes();

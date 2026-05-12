@@ -11,9 +11,12 @@ const DEFAULT_CORPUS: &str = "/Users/jsh/media/doom_wads";
 // Flag combinations to test. The empty string means "default flags".
 const FLAG_MATRIX: &[&[&str]] = &[
     &[],
-    &["-z"], // compressed regular nodes (ZNODES)
-    // -g still has a residual byte-diff in a handful of GL_SEGS records — works
-    // but not yet byte-identical. See Phase 5c notes.
+    &["-z"], // compressed ZNODES
+    &["-Z"], // compress only regular NODES (not relevant without -g)
+    &["-X"], // extended uncompressed XNOD
+    &["-P"], // skip polyobject containment checks
+    // -g still has a residual byte-diff in a few GL_SEGS records.
+    // -G / -x / -5 are Phase 6c.
 ];
 
 fn baseline_path() -> PathBuf {

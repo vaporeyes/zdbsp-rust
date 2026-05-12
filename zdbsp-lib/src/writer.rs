@@ -28,6 +28,9 @@ pub enum RejectMode {
     Create0,
     /// Emit a REJECT filled with zero bytes (every sector visible from every other).
     CreateZeroes,
+    /// Rebuild from scratch. **Unsupported** — falls through to `DontTouch` after
+    /// printing a warning, exactly matching the C++ behavior at processor.cpp:669-674.
+    Rebuild,
 }
 
 /// What to do with the BLOCKMAP lump. Mirrors `EBlockmapMode`.
@@ -38,7 +41,7 @@ pub enum BlockmapMode {
     Create0,
 }
 
-/// Per-map writer options.
+/// Per-map writer options. Names follow the C++ `main.cpp` globals.
 #[derive(Debug, Clone, Copy)]
 pub struct WriterOptions {
     pub blockmap_mode: BlockmapMode,
@@ -46,10 +49,13 @@ pub struct WriterOptions {
     pub build_nodes: bool,
     /// `-g`: build and emit GL nodes alongside the regular tree.
     pub build_gl_nodes: bool,
-    /// `-z`: force ZNODES/ZGLN compressed output.
+    /// `-z` / `-Z` / `-X`: select extended format for regular NODES.
     pub compress_nodes: bool,
-    /// `-Z`: compress only the regular NODES, leave GL uncompressed.
+    /// `-z` / `-X`: select extended format for GL nodes too. `-Z` leaves this off.
     pub compress_gl_nodes: bool,
+    /// `-z` / `-Z`: when extended output is selected, force ZLib compression (ZNOD).
+    /// `-X` clears this so the extended output stays uncompressed (XNOD).
+    pub force_compression: bool,
 }
 
 impl Default for WriterOptions {
@@ -61,6 +67,7 @@ impl Default for WriterOptions {
             build_gl_nodes: false,
             compress_nodes: false,
             compress_gl_nodes: false,
+            force_compression: false,
         }
     }
 }
@@ -151,31 +158,56 @@ pub fn write_map(
             out.create_label("SEGS")?;
             if compress_gl {
                 if let Some(gl) = gl_nodes {
-                    wcomp::write_gl_bspz(
-                        out,
-                        "SSECTORS",
-                        &gl.vertices,
-                        &gl.subsectors,
-                        &gl.segs,
-                        &gl.nodes,
-                        num_org_verts,
-                        level.num_lines(),
-                    )?;
+                    if opts.force_compression {
+                        wcomp::write_gl_bspz(
+                            out,
+                            "SSECTORS",
+                            &gl.vertices,
+                            &gl.subsectors,
+                            &gl.segs,
+                            &gl.nodes,
+                            num_org_verts,
+                            level.num_lines(),
+                        )?;
+                    } else {
+                        wcomp::write_gl_bspx(
+                            out,
+                            "SSECTORS",
+                            &gl.vertices,
+                            &gl.subsectors,
+                            &gl.segs,
+                            &gl.nodes,
+                            num_org_verts,
+                            level.num_lines(),
+                        )?;
+                    }
                 } else {
                     out.create_label("SSECTORS")?;
                 }
             } else {
                 out.create_label("SSECTORS")?;
             }
-            wcomp::write_bspz(
-                out,
-                "NODES",
-                &nodes.vertices,
-                &nodes.subsectors,
-                &nodes.segs,
-                &nodes.nodes,
-                num_org_verts,
-            )?;
+            if opts.force_compression {
+                wcomp::write_bspz(
+                    out,
+                    "NODES",
+                    &nodes.vertices,
+                    &nodes.subsectors,
+                    &nodes.segs,
+                    &nodes.nodes,
+                    num_org_verts,
+                )?;
+            } else {
+                wcomp::write_bspx(
+                    out,
+                    "NODES",
+                    &nodes.vertices,
+                    &nodes.subsectors,
+                    &nodes.segs,
+                    &nodes.nodes,
+                    num_org_verts,
+                )?;
+            }
         }
     } else {
         copy_map_lump(out, wad, map_lump, "SEGS")?;
@@ -382,9 +414,17 @@ fn write_reject(
     mode: RejectMode,
 ) -> io::Result<()> {
     let reject_size = (level.num_sectors() * level.num_sectors() + 7) / 8;
-    match mode {
+    // C++ falls Rebuild through to DontTouch with a printed warning.
+    let effective = if mode == RejectMode::Rebuild {
+        println!("   Rebuilding the reject is unsupported.");
+        RejectMode::DontTouch
+    } else {
+        mode
+    };
+    match effective {
         RejectMode::Create0 => out.create_label("REJECT"),
         RejectMode::CreateZeroes => out.write_lump("REJECT", &vec![0u8; reject_size]),
+        RejectMode::Rebuild => unreachable!(),
         RejectMode::DontTouch => {
             let idx = wad.find_map_lump("REJECT", map_lump);
             if idx < 0 {
