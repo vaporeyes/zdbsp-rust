@@ -5,7 +5,9 @@
 use crate::fixed::Fixed;
 use crate::workdata::{Node, Subsector};
 
+pub mod classify;
 pub mod types;
+pub mod util;
 
 pub use types::*;
 
@@ -84,7 +86,21 @@ pub struct NodeBuilder<'a> {
 
     /// Progress meter state.
     pub(crate) segs_stuffed: i32,
+
+    // Vertex map (FVertexMap). Populated after FindMapBounds via `init_vertex_map`.
+    pub(crate) vmap_min_x: Fixed,
+    pub(crate) vmap_min_y: Fixed,
+    pub(crate) vmap_max_x: Fixed,
+    pub(crate) vmap_max_y: Fixed,
+    pub(crate) vmap_blocks_wide: i32,
+    pub(crate) vmap_blocks_tall: i32,
+    pub(crate) vmap_grid: Vec<Vec<i32>>,
 }
+
+/// `(BLOCK_SHIFT, BLOCK_SIZE)` from FVertexMap: 8 + FRACBITS = 24, so each block covers
+/// 256 map units of fixed-point space.
+pub(crate) const VMAP_BLOCK_SHIFT: u32 = 8 + crate::fixed::FRACBITS;
+pub(crate) const VMAP_BLOCK_SIZE: i64 = 1i64 << VMAP_BLOCK_SHIFT;
 
 /// Sentinel used inside the node builder for "no seg" / "no vertex" indices, matching
 /// the C++ `DWORD_MAX`.
@@ -120,6 +136,13 @@ impl<'a> NodeBuilder<'a> {
             poly_starts,
             poly_anchors,
             segs_stuffed: 0,
+            vmap_min_x: 0,
+            vmap_min_y: 0,
+            vmap_max_x: 0,
+            vmap_max_y: 0,
+            vmap_blocks_wide: 0,
+            vmap_blocks_tall: 0,
+            vmap_grid: Vec::new(),
         }
     }
 

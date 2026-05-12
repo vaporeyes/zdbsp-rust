@@ -19,6 +19,21 @@ pub fn from_map_unit(coord: i16) -> Fixed {
     (coord as i32) << FRACBITS
 }
 
+/// Doom Binary Angular Measurement (BAM). Full circle = 2^32.
+pub type Angle = u32;
+
+/// Direct port of `PointToAngle` from main.cpp:686.
+///
+/// `atan2(y, x) * 2^30 / pi`, truncated to `i32`, reinterpreted as `u32`, then shifted
+/// left one bit. The intermediate `f64 → i32` cast is safe because `|dbam| <= 2^30 < 2^31`.
+#[inline]
+pub fn point_to_angle(x: Fixed, y: Fixed) -> Angle {
+    let ang = (y as f64).atan2(x as f64);
+    let rad2bam = (1i64 << 30) as f64 / std::f64::consts::PI;
+    let dbam = ang * rad2bam;
+    ((dbam as i32) as u32) << 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
