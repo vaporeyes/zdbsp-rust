@@ -209,6 +209,13 @@ impl<'a> NodeBuilder<'a> {
         &self.vertices
     }
 
+    /// Number of original line-graph vertices (i.e. count after `find_used_vertices`
+    /// but before any seg splits introduced builder intersections). Needed by the GL
+    /// writers to encode high-bit vertex references.
+    pub fn initial_vertex_count(&self) -> usize {
+        self.initial_vertices
+    }
+
     /// Run the full build pipeline. Mirrors `FNodeBuilder::FNodeBuilder` from
     /// nodebuild.cpp:42 followed by `BuildTree`:
     ///   init_vertex_map → find_used_vertices → make_segs_from_sides →

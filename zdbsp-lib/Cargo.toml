@@ -8,3 +8,5 @@ description = "Node builder library for Doom-format WADs (Rust port of ZDBSP)"
 
 [dependencies]
 thiserror = "1"
+# zlib feature uses real libz so deflate output matches the C++ baseline byte-for-byte.
+flate2 = { version = "1", default-features = false, features = ["zlib"] }

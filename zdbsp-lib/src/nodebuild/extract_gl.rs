@@ -109,12 +109,21 @@ impl<'a> NodeBuilder<'a> {
 
         if diff_planes {
             // "Well-behaved" subsector — angle-sort the segs.
-            for i in (first + 1)..max {
-                let _ = i;
+            //
+            // Faithful port of nodebuild_extract.cpp:155-201. The C++ tracks `seg` as
+            // a live pointer assigned each j-iteration and, on j-loop exit, either
+            //   (a) `seg == bestseg` if we broke out via `seg->v1 == prev->v2`, or
+            //   (b) `seg == Segs[SegList[max-1]]` if we fell through normally, after
+            //       which `if (bestseg != NULL) seg = bestseg` overrides.
+            // The storedseg write target is whatever `seg` was after that override.
+            for _i in (first + 1)..max {
                 let mut best_diff: Angle = ANGLE_MAX;
                 let mut best_seg_idx: u32 = NO_NODE_INDEX;
+                let mut last_j_seg_idx: u32 = NO_NODE_INDEX; // matches `seg` at j-loop exit
+                let mut broke_early = false;
                 for j in first..max {
                     let cand_idx = self.seg_list[j].seg_num;
+                    last_j_seg_idx = cand_idx;
                     let cand = self.segs[cand_idx as usize];
                     let cv1 = self.vertices[cand.v1 as usize];
                     let ang = point_to_angle(cv1.x - midx, cv1.y - midy);
@@ -122,6 +131,7 @@ impl<'a> NodeBuilder<'a> {
                     if cand.v1 == prev.v2 {
                         best_diff = diff;
                         best_seg_idx = cand_idx;
+                        broke_early = true;
                         break;
                     }
                     if diff < best_diff && diff > 0 {
@@ -129,21 +139,29 @@ impl<'a> NodeBuilder<'a> {
                         best_seg_idx = cand_idx;
                     }
                 }
-                if best_seg_idx == NO_NODE_INDEX {
+                // After j-loop: `seg_idx` == `bestseg` if we broke early, otherwise
+                // last-j; then `if (bestseg != NULL) seg = bestseg` override applies.
+                let seg_idx = if broke_early {
+                    best_seg_idx
+                } else if best_seg_idx != NO_NODE_INDEX {
+                    best_seg_idx
+                } else {
+                    last_j_seg_idx
+                };
+                if seg_idx == NO_NODE_INDEX {
                     continue;
                 }
-                let best_seg = self.segs[best_seg_idx as usize];
-                if prev.v2 != best_seg.v1 {
-                    self.push_connecting_gl_seg(segs, prev.v2, best_seg.v1);
+                let seg_chosen = self.segs[seg_idx as usize];
+                if prev.v2 != seg_chosen.v1 {
+                    self.push_connecting_gl_seg(segs, prev.v2, seg_chosen.v1);
                     count += 1;
                 }
                 prev_angle = prev_angle.wrapping_sub(best_diff);
-                let stored = self.push_gl_seg(segs, &best_seg);
-                self.segs[best_seg_idx as usize].stored_seg = stored;
+                let stored = self.push_gl_seg(segs, &seg_chosen);
+                self.segs[seg_idx as usize].stored_seg = stored;
                 count += 1;
-                prev = best_seg;
-                let _ = best_seg_idx; // C++ tracks the seg, not its index
-                if best_seg.v2 == first_vert {
+                prev = seg_chosen;
+                if seg_chosen.v2 == first_vert {
                     break;
                 }
             }
@@ -205,8 +223,10 @@ impl<'a> NodeBuilder<'a> {
             let init: f64 = if forward { -f64::MAX } else { f64::MAX };
             let mut best_dot = init;
             let mut best_idx: u32 = NO_NODE_INDEX;
+            let mut last_cand_idx: u32 = NO_NODE_INDEX;
             for j in (first + 1)..max {
                 let cand_idx = self.seg_list[j].seg_num;
+                last_cand_idx = cand_idx;
                 let cand = self.segs[cand_idx as usize];
                 if cand.plane_front != want_side {
                     continue;
@@ -232,11 +252,8 @@ impl<'a> NodeBuilder<'a> {
                     count += 1;
                 }
                 let stored = self.push_gl_seg(segs, &best_seg);
-                // The C++ writes `seg->storedseg = PushGLSeg(...)` where `seg` is
-                // confusingly still pointing at the iterator var, not `bestseg`.
-                // We mirror the (likely-buggy) C++ behavior by writing back to
-                // `bestseg`'s index — same effect on a single-element loop iteration.
-                self.segs[best_idx as usize].stored_seg = stored;
+                // Mirror C++ bug: storedseg written to last j-iteration's seg.
+                self.segs[last_cand_idx as usize].stored_seg = stored;
                 count += 1;
                 *prev = best_seg;
                 *prev_idx = best_idx;

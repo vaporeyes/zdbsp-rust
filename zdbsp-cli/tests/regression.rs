@@ -9,13 +9,11 @@ const DEFAULT_BASELINE: &str = "/Users/jsh/dev/repos/zdbsp/build/zdbsp";
 const DEFAULT_CORPUS: &str = "/Users/jsh/media/doom_wads";
 
 // Flag combinations to test. The empty string means "default flags".
-// Once Phase 6 lands these expand to cover -g, -G, -z, -Z, -5, -x, etc.
 const FLAG_MATRIX: &[&[&str]] = &[
     &[],
-    // &["-g"],          // GL nodes
-    // &["-G"],          // GL-matching
-    // &["-z"],          // compressed nodes
-    // &["-Z"],          // compress normal nodes only
+    &["-z"], // compressed regular nodes (ZNODES)
+    // -g still has a residual byte-diff in a handful of GL_SEGS records — works
+    // but not yet byte-identical. See Phase 5c notes.
 ];
 
 fn baseline_path() -> PathBuf {

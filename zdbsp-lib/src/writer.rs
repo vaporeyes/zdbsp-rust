@@ -8,8 +8,10 @@ use crate::blockmap;
 use crate::fixed::FRACBITS;
 use crate::level::{Level, MapNodeEx, MapSubsectorEx, NO_INDEX};
 use crate::nodebuild::extract::NodeOutput;
+use crate::nodebuild::extract_gl::GlNodeOutput;
 use crate::processor::MapFormat;
 use crate::wad::{WadReader, WadWriter};
+use crate::{writer_compressed as wcomp, writer_gl as wgl};
 
 /// `NF_SUBSECTOR` flag used in the classic 16-bit NODES lump child references. Matches
 /// `doomdata.h:160`.
@@ -42,6 +44,12 @@ pub struct WriterOptions {
     pub blockmap_mode: BlockmapMode,
     pub reject_mode: RejectMode,
     pub build_nodes: bool,
+    /// `-g`: build and emit GL nodes alongside the regular tree.
+    pub build_gl_nodes: bool,
+    /// `-z`: force ZNODES/ZGLN compressed output.
+    pub compress_nodes: bool,
+    /// `-Z`: compress only the regular NODES, leave GL uncompressed.
+    pub compress_gl_nodes: bool,
 }
 
 impl Default for WriterOptions {
@@ -50,25 +58,27 @@ impl Default for WriterOptions {
             blockmap_mode: BlockmapMode::Rebuild,
             reject_mode: RejectMode::DontTouch,
             build_nodes: true,
+            build_gl_nodes: false,
+            compress_nodes: false,
+            compress_gl_nodes: false,
         }
     }
 }
 
-/// Emit a fully-built map to `out`. Mirrors `FProcessor::Write` from processor.cpp:511 for
-/// the classic (non-GL, non-compressed) path.
+/// Emit a fully-built map to `out`. Mirrors `FProcessor::Write` from processor.cpp:511.
 ///
-/// * `wad` — the source wad; used to copy through THINGS, BEHAVIOR, SCRIPTS, and (when
-///   `build_nodes` is false) SEGS/SSECTORS/NODES.
-/// * `map_lump` — index of the map header in `wad`.
-/// * `level` — fully loaded + pruned map.
-/// * `nodes` — extracted node-builder output for this map.
-/// * `format` — Doom or Hexen (UDMF is not supported in Phase 5b).
+/// * `gl_nodes` — optional GL extraction output (only present when `-g` was requested).
+/// * `num_org_verts` — number of original line-graph vertices, shared between regular
+///   and GL builds. Used both for the GL_SEGS high-bit vertex encoding and for the
+///   "compressed VERTEXES = original verts only" rule.
 pub fn write_map(
     out: &mut WadWriter,
     wad: &mut WadReader,
     map_lump: i32,
     level: &Level,
     nodes: &NodeOutput,
+    gl_nodes: Option<&GlNodeOutput>,
+    num_org_verts: u32,
     format: MapFormat,
     opts: WriterOptions,
 ) -> io::Result<()> {
@@ -89,6 +99,8 @@ pub fn write_map(
         out.create_label("SEGS")?;
         out.create_label("SSECTORS")?;
         out.create_label("NODES")?;
+        let _ = gl_nodes;
+        let _ = num_org_verts;
         copy_map_lump(out, wad, map_lump, "SECTORS")?;
         out.create_label("REJECT")?;
         out.create_label("BLOCKMAP")?;
@@ -99,17 +111,72 @@ pub fn write_map(
         return Ok(());
     }
 
+    // Decide compression flags using the same thresholds as processor.cpp:734-753.
+    let has_gl = gl_nodes.is_some();
+    let mut compress_gl = if has_gl {
+        opts.compress_gl_nodes || nodes.vertices.len() > 32767
+    } else {
+        false
+    };
+    let _ = compress_gl;
+    let compress = opts.compress_nodes
+        || compress_gl
+        || nodes.vertices.len() > 65535
+        || nodes.segs.len() > 65535
+        || nodes.subsectors.len() > 32767
+        || nodes.nodes.len() > 32767;
+    // C++ comment at processor.cpp:748: if regular is compressed, GL must be too.
+    if compress {
+        compress_gl = has_gl;
+    }
+
     // Header label (the map name).
     out.copy_lump(wad, map_lump)?;
     copy_map_lump(out, wad, map_lump, "THINGS")?;
     write_lines(out, level, extended)?;
     write_sides(out, level)?;
-    write_vertices(out, &nodes.vertices)?;
+    // For compressed (or GL-only) output, VERTEXES holds only original verts; the new
+    // ones live in ZNODES / GL_VERT / etc.
+    let vert_count = if compress { num_org_verts as usize } else { nodes.vertices.len() };
+    write_vertices_count(out, &nodes.vertices, vert_count)?;
 
     if opts.build_nodes {
-        write_segs(out, &nodes.segs)?;
-        write_ssectors(out, &nodes.subsectors)?;
-        write_nodes(out, &nodes.nodes)?;
+        if !compress {
+            write_segs(out, &nodes.segs)?;
+            // SSECTORS lump: empty label only when compress_gl forces ZGLN here.
+            // Without compression we always emit the normal subsector array.
+            write_ssectors(out, &nodes.subsectors)?;
+            write_nodes(out, &nodes.nodes)?;
+        } else {
+            out.create_label("SEGS")?;
+            if compress_gl {
+                if let Some(gl) = gl_nodes {
+                    wcomp::write_gl_bspz(
+                        out,
+                        "SSECTORS",
+                        &gl.vertices,
+                        &gl.subsectors,
+                        &gl.segs,
+                        &gl.nodes,
+                        num_org_verts,
+                        level.num_lines(),
+                    )?;
+                } else {
+                    out.create_label("SSECTORS")?;
+                }
+            } else {
+                out.create_label("SSECTORS")?;
+            }
+            wcomp::write_bspz(
+                out,
+                "NODES",
+                &nodes.vertices,
+                &nodes.subsectors,
+                &nodes.segs,
+                &nodes.nodes,
+                num_org_verts,
+            )?;
+        }
     } else {
         copy_map_lump(out, wad, map_lump, "SEGS")?;
         copy_map_lump(out, wad, map_lump, "SSECTORS")?;
@@ -123,6 +190,22 @@ pub fn write_map(
     if extended {
         copy_map_lump(out, wad, map_lump, "BEHAVIOR")?;
         copy_map_lump_optional(out, wad, map_lump, "SCRIPTS")?;
+    }
+
+    // GL block: appended after the map, only when not compressed-GL.
+    if let Some(gl) = gl_nodes {
+        if !compress_gl {
+            let map_name = wad.lump_name(map_lump).into_owned();
+            let mut label = String::from("GL_");
+            for c in map_name.chars().take(5) {
+                label.push(c);
+            }
+            out.create_label(&label)?;
+            wgl::write_gl_vertices(out, &gl.vertices, num_org_verts as usize)?;
+            wgl::write_gl_segs(out, &gl.segs, num_org_verts)?;
+            wgl::write_gl_ssect(out, &gl.subsectors)?;
+            wgl::write_gl_nodes(out, &gl.nodes)?;
+        }
     }
 
     Ok(())
@@ -152,9 +235,14 @@ fn copy_map_lump_optional(
 }
 
 /// VERTEXES: `i16(x>>16), i16(y>>16)` pairs.
-fn write_vertices(out: &mut WadWriter, verts: &[crate::level::WideVertex]) -> io::Result<()> {
-    let mut buf = Vec::with_capacity(verts.len() * 4);
-    for v in verts {
+fn write_vertices_count(
+    out: &mut WadWriter,
+    verts: &[crate::level::WideVertex],
+    count: usize,
+) -> io::Result<()> {
+    let n = count.min(verts.len());
+    let mut buf = Vec::with_capacity(n * 4);
+    for v in &verts[..n] {
         buf.extend_from_slice(&((v.x >> FRACBITS) as i16).to_le_bytes());
         buf.extend_from_slice(&((v.y >> FRACBITS) as i16).to_le_bytes());
     }

@@ -9,3 +9,5 @@ pub mod processor;
 pub mod wad;
 pub mod workdata;
 pub mod writer;
+pub mod writer_compressed;
+pub mod writer_gl;

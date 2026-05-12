@@ -17,6 +17,9 @@ struct Args {
     map_filter: Option<String>,
     no_prune: bool,
     build_nodes: bool,
+    build_gl_nodes: bool,
+    compress_nodes: bool,
+    compress_gl_nodes: bool,
     reject_mode: RejectMode,
     blockmap_mode: BlockmapMode,
 }
@@ -49,6 +52,12 @@ fn parse_args() -> Result<Args, String> {
             a.map_filter = Some(rest.to_string());
         } else if arg == "-N" || arg == "--no-nodes" {
             a.build_nodes = false;
+        } else if arg == "-g" || arg == "--gl" {
+            a.build_gl_nodes = true;
+        } else if arg == "-z" || arg == "--compress" {
+            a.compress_nodes = true;
+        } else if arg == "-Z" || arg == "--compress-normal" {
+            a.compress_gl_nodes = true;
         } else if arg == "-q" || arg == "--no-prune" {
             a.no_prune = true;
         } else if arg == "-r" || arg == "--empty-reject" {
@@ -85,6 +94,9 @@ fn run(args: Args) -> Result<(), String> {
         blockmap_mode: args.blockmap_mode,
         reject_mode: args.reject_mode,
         build_nodes: args.build_nodes,
+        build_gl_nodes: args.build_gl_nodes,
+        compress_nodes: args.compress_nodes,
+        compress_gl_nodes: args.compress_gl_nodes,
     };
 
     let mut reader = WadReader::open(input).map_err(|e| format!("open input: {e}"))?;
@@ -119,26 +131,52 @@ fn run(args: Args) -> Result<(), String> {
             eprintln!("----{map_name}----");
             let mut processor = Processor::load(&mut reader, lump, args.no_prune)
                 .map_err(|e| format!("load {map_name}: {e}"))?;
-            let nodes = if args.build_nodes {
+
+            // GL build (optional). Mirrors processor.cpp:617-636: build GL first, then
+            // throw away the builder and load again for the regular build.
+            let (gl_out, gl_num_org) = if args.build_nodes && args.build_gl_nodes {
+                let (starts, anchors) = collect_poly_spots(&processor.level);
+                let mut nb = NodeBuilder::new(&mut processor.level, starts, anchors, &map_name, true);
+                nb.build();
+                let num_org = nb.initial_vertex_count() as u32;
+                let extracted = nb.extract_gl();
+                (Some(extracted), num_org)
+            } else {
+                (None, 0)
+            };
+
+            // Reload the level for the regular build so the vertex array starts fresh.
+            // (The GL build mutated processor.level.lines to reference the GL builder's
+            // vertex indices.)
+            if args.build_gl_nodes && args.build_nodes {
+                processor = Processor::load(&mut reader, lump, args.no_prune)
+                    .map_err(|e| format!("reload {map_name}: {e}"))?;
+            }
+
+            let (nodes, num_org_verts) = if args.build_nodes {
                 let (starts, anchors) = collect_poly_spots(&processor.level);
                 let mut nb = NodeBuilder::new(&mut processor.level, starts, anchors, &map_name, false);
                 nb.build();
+                let num_org = nb.initial_vertex_count() as u32;
                 let out = nb.extract_nodes();
-                // The C++ replaces `Level.Vertices` with the builder's expanded array
-                // (processor.cpp:598-599) so the post-build code paths that re-read
-                // `Vertices[Lines[i].v1]` get the right coords. Mirror that here so the
-                // blockmap rebuild sees the correct vertices.
+                // Mirror processor.cpp:598-599: replace Level.Vertices with the builder's
+                // expanded array so the blockmap rebuild reads the right coords.
                 processor.level.vertices = out.vertices.clone();
-                out
+                (out, num_org)
             } else {
-                zdbsp_lib::nodebuild::extract::NodeOutput::default()
+                (zdbsp_lib::nodebuild::extract::NodeOutput::default(), 0)
             };
+
+            let final_num_org = if gl_out.is_some() { gl_num_org } else { num_org_verts };
+
             writer::write_map(
                 &mut out,
                 &mut reader,
                 lump,
                 &processor.level,
                 &nodes,
+                gl_out.as_ref(),
+                final_num_org,
                 processor.format,
                 opts,
             )
