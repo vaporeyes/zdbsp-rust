@@ -4,5 +4,7 @@
 pub mod blockmap;
 pub mod fixed;
 pub mod level;
+pub mod nodebuild;
 pub mod processor;
 pub mod wad;
+pub mod workdata;
