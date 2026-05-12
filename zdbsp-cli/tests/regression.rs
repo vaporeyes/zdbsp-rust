@@ -12,11 +12,15 @@ const DEFAULT_CORPUS: &str = "/Users/jsh/media/doom_wads";
 const FLAG_MATRIX: &[&[&str]] = &[
     &[],
     &["-z"], // compressed ZNODES
-    &["-Z"], // compress only regular NODES (not relevant without -g)
+    &["-Z"], // compress only regular NODES
     &["-X"], // extended uncompressed XNOD
     &["-P"], // skip polyobject containment checks
-    // -g still has a residual byte-diff in a few GL_SEGS records.
-    // -G / -x / -5 are Phase 6c.
+    &["-g"], // build GL nodes alongside regular
+    &["-G"], // gl-matching (single build, derive regular from GL)
+    &["-x"], // GL-only output
+    &["-5"], // v5 GL flag (no-op without -g)
+    // -g -5 / -G -5 fail because the C++ writes uninitialized struct-padding
+    // bytes in v5 GL_SEGS records (strict UB). We emit zeros.
 ];
 
 fn baseline_path() -> PathBuf {

@@ -20,15 +20,20 @@ baseline on every IWAD in `~/media/doom_wads/` for these flag combinations:
 | `-Z` | 7 / 7 | compress regular only |
 | `-X` | 7 / 7 | XNOD extended uncompressed |
 | `-P` | 7 / 7 | no polyobjects |
-| `-5` (no `-g`) | 7 / 7 | v5 flag without GL build is a no-op |
-| `-g`, `-G`, `-x`, `-g -5`, `-G -5` | 0 / 7 | functional; close_subsector residual differs |
+| `-g` | 7 / 7 | GL nodes alongside regular |
+| `-G` | 7 / 7 | GL-matching (single build, derive regular) |
+| `-x` | 7 / 7 | GL-only output |
+| `-5` | 7 / 7 | v5 flag without GL build (no-op) |
+| `-g -5`, `-G -5` | 0 / 7 | C++ writes uninitialized v5 GL_SEGS padding bytes (UB) |
 
-Tests: **60 total, all green**, plus a strict regression matrix covering 35 IWAD/flag
-combinations enforced by `ZDBSP_REGRESSION=1 cargo test`.
+**63 of 77 IWAD × flag combinations byte-identical.** Strict regression
+(`ZDBSP_REGRESSION=1 cargo test`) enforces 9 flag combos × 7 IWADs.
 
-The remaining residual is a small (`~4 subsectors per map`) divergence in
-`close_subsector`'s angle-sort selection that affects GL output but not playability.
-Documented inline in `zdbsp-lib/src/nodebuild/extract_gl.rs`.
+The only remaining gap is the v5 GL_SEGS path: `MapSegGLEx`'s natural alignment leaves
+a 2-byte hole between `side` and `partner`, and the C++ leaves those bytes whatever
+the heap allocator returned — UB that's coincidentally deterministic on this Mac but
+not byte-reproducible without exactly mimicking Apple's allocator. The Rust port
+emits zero bytes there.
 
 ## Build
 
@@ -140,6 +145,21 @@ location in the source.
 - **`SortSegs` uses libc `qsort` (unstable)** — Rust's `sort_unstable_by` doesn't
   match BSD `qsort`'s permutation of equal-keyed elements. The port routes through
   libc `qsort` via FFI so seg-ordering ties resolve identically.
+- **`WriteGLVertices` truncates `fixed_t` via `LittleShort`** — the C++ writer's
+  `LittleShort(vertdata[i].x)` narrows a 32-bit fixed-point coord to 16 bits, then
+  zero-extends back into the 32-bit slot, losing the fractional 16 bits. We mirror
+  the truncation for byte-identical GL_VERT output.
+- **`OutputDegenerateSubsector` `bestinit` index** — the C++ uses
+  `bestinit[bForward]` where `bForward` is `bool` indexing as `false→0→-DBL_MAX`,
+  `true→1→+DBL_MAX`. An initial port had this inverted (`-MAX` for forward,
+  `+MAX` for backward), which silently no-op'd the entire degenerate-subsector
+  forward path and produced 7 missing GL_SEGS records per E1M1. Fixed.
+- **`PushGLSeg` sidedef-compression vertex lookup** — the C++ does
+  `Level.Vertices[seg->v1]` for the distance computation, after `Level.Vertices`
+  was replaced with the builder's expanded array (post-`GetVertices` swap). In
+  Rust, the equivalent is `self.vertices` (the builder), not `self.level.vertices`
+  (still the original). An initial port mixed the two arrays, producing wrong
+  `side` values on sidedef-compressed lines.
 
 ## License
 

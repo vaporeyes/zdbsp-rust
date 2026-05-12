@@ -13,9 +13,15 @@ const GL_VERT_MAGIC_V2: [u8; 4] = *b"gNd2";
 /// GL_VERT v5 magic.
 const GL_VERT_MAGIC_V5: [u8; 4] = *b"gNd5";
 
-/// Write GL_VERT: 4 magic bytes followed by `(x, y)` fixed-point pairs for the
-/// builder-added vertices only (indices `[num_org_verts, vertices.len())`).
-/// The `v5` flag swaps the magic from "gNd2" to "gNd5"; record layout is identical.
+/// Write GL_VERT: 4 magic bytes followed by `(x, y)` per builder-added vertex
+/// (indices `[num_org_verts, vertices.len())`). The `v5` flag only changes the magic
+/// from "gNd2" to "gNd5"; record layout is otherwise identical.
+///
+/// **Bug-mirror**: the C++ `WriteGLVertices` calls `LittleShort(vertdata[i].x)` on a
+/// `fixed_t` (32-bit) coord (processor.cpp:1250). `LittleShort` is a 16-bit byte swap;
+/// the int32 is implicitly narrowed to int16, then the result zero-extends back into
+/// the 32-bit slot. Each output coord is therefore the low 16 bits of the fixed-point
+/// value followed by 2 zero bytes. We mirror this for byte-identical parity.
 pub fn write_gl_vertices(
     out: &mut WadWriter,
     vertices: &[WideVertex],
@@ -26,8 +32,11 @@ pub fn write_gl_vertices(
     let mut buf = Vec::with_capacity(4 + added.len() * 8);
     buf.extend_from_slice(if v5 { &GL_VERT_MAGIC_V5 } else { &GL_VERT_MAGIC_V2 });
     for v in added {
-        buf.extend_from_slice(&v.x.to_le_bytes());
-        buf.extend_from_slice(&v.y.to_le_bytes());
+        // Low 16 bits, zero-padded to 32 — mirrors LittleShort-into-fixed_t.
+        let xlo = (v.x as i16 as u16) as u32;
+        let ylo = (v.y as i16 as u16) as u32;
+        buf.extend_from_slice(&xlo.to_le_bytes());
+        buf.extend_from_slice(&ylo.to_le_bytes());
     }
     out.write_lump("GL_VERT", &buf)
 }
@@ -83,9 +92,14 @@ pub fn write_gl_ssect(out: &mut WadWriter, subs: &[MapSubsectorEx]) -> io::Resul
 ///   u32 v1, u32 v2 (high bit 0x80000000 = builder-added vertex offset)  — 8 bytes
 ///   u32 linedef (zero-extended from the 16-bit value the C++ writes)    — 4 bytes
 ///   u16 side, 2 bytes of padding, u32 partner                           — 8 bytes
-/// Total = 20 bytes per record. The C++ relies on `new MapSegGLEx[]` happening to
-/// land on a zero page so the alignment padding ends up as zero; we emit zeros
-/// explicitly to keep the output deterministic and byte-identical.
+/// Total = 20 bytes per record.
+///
+/// **C++ UB note**: the C++ `WriteGLSegs5` writes only 18 of the 20 bytes per record
+/// and leaves 2 alignment-padding bytes (offsets 14-15) uninitialized — whatever happens
+/// to be in the heap memory at that location. On this Mac the allocator gives values
+/// like 0x002D and 0x574F that happen to be deterministic across runs, but they are
+/// strictly UB. We emit zero bytes, which doesn't byte-match the baseline on `-5` flag
+/// combinations but is the only deterministic correct behavior.
 pub fn write_gl_segs_v5(
     out: &mut WadWriter,
     segs: &[MapSegGlEx],

@@ -1,14 +1,6 @@
 // ABOUTME: Port of nodebuild_extract.cpp's GL paths: GetGLNodes, CloseSubsector,
 // ABOUTME: OutputDegenerateSubsector, PushGLSeg, PushConnectingGLSeg. Produces the
 // ABOUTME: MapNodeEx / MapSegGlEx / MapSubsectorEx arrays for GL output.
-//
-// Known residual versus the C++ baseline (~4 subsectors per E1M1, similar for other
-// maps): a handful of subsectors emit fewer GL_SEGS records than the C++. The build's
-// internal seg array (`nb.segs()`) carries the correct seg counts — verified per-line
-// — so the divergence is in `close_subsector`'s angle-sort selection picking different
-// candidates in degenerate or near-degenerate subsector geometries. The GL output is
-// still well-formed and renders in ZDoom; just not byte-identical. Diagnostic prints
-// would be needed in both C++ and Rust to pin the exact triggering condition.
 
 use crate::fixed::{point_to_angle, Angle, Fixed, FRACBITS};
 use crate::level::{MapNodeEx, MapSegGlEx, MapSubsectorEx, WideVertex, NO_INDEX};
@@ -228,7 +220,12 @@ impl<'a> NodeBuilder<'a> {
         let want_side = lead.plane_front ^ !forward;
 
         for _i in (first + 1)..max {
-            let init: f64 = if forward { -f64::MAX } else { f64::MAX };
+            // C++ uses `static const double bestinit[2] = { -DBL_MAX, DBL_MAX };
+            // double bestdot = bestinit[bForward];` — i.e. bForward indexes as a `bool→int`:
+            // `false→0→-MAX`, `true→1→+MAX`. We had this inverted previously, which made
+            // the forward sweep's `dot < bestdot` test never succeed and silently no-op
+            // the entire degenerate-subsector forward path.
+            let init: f64 = if forward { f64::MAX } else { -f64::MAX };
             let mut best_dot = init;
             let mut best_idx: u32 = NO_NODE_INDEX;
             let mut last_cand_idx: u32 = NO_NODE_INDEX;
@@ -286,7 +283,12 @@ impl<'a> NodeBuilder<'a> {
         if new.linedef != NO_INDEX {
             let ld = &self.level.lines[new.linedef as usize];
             if ld.sidenum[0] == ld.sidenum[1] {
-                let lv1 = &self.level.vertices[ld.v1 as usize];
+                // The C++ does `Level.Vertices[ld->v1]` after replacing `Level.Vertices`
+                // with the builder's expanded vertex array (processor.cpp:598-599). Our
+                // builder vertices live in `self.vertices`, so look up *all three*
+                // (lv1, sv1, sv2) there — `ld.v1` is a builder-vertex index after
+                // `find_used_vertices` remapped it.
+                let lv1 = &self.vertices[ld.v1 as usize];
                 let sv1 = &self.vertices[seg.v1 as usize];
                 let sv2 = &self.vertices[seg.v2 as usize];
                 let d1x = (sv1.x - lv1.x) as f64;
