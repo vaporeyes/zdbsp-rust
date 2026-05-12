@@ -6,6 +6,7 @@ use crate::fixed::Fixed;
 use crate::workdata::{Node, Subsector};
 
 pub mod classify;
+pub mod events;
 pub mod types;
 pub mod util;
 
@@ -73,6 +74,8 @@ pub struct NodeBuilder<'a> {
     pub(crate) touched: Vec<i32>,
     /// Loops with edges colinear to a splitter.
     pub(crate) colinear: Vec<i32>,
+    /// Vertices intersected by the current splitter.
+    pub(crate) events: events::EventTree,
     /// Segs collinear with the current splitter.
     pub(crate) split_sharers: Vec<SplitSharer>,
 
@@ -130,6 +133,7 @@ impl<'a> NodeBuilder<'a> {
             initial_vertices: 0,
             touched: Vec::new(),
             colinear: Vec::new(),
+            events: events::EventTree::new(),
             split_sharers: Vec::new(),
             hack_seg: NO_NODE_INDEX,
             hack_mate: NO_NODE_INDEX,
