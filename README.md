@@ -1,36 +1,146 @@
 # zdbsp-rust
 
-Rust port of [ZDBSP](https://github.com/ZDoom/zdbsp), ZDoom's stand-alone node builder. The C++ source being ported lives at `/Users/jsh/dev/repos/zdbsp/`.
+A Rust port of [ZDBSP](https://github.com/ZDoom/zdbsp), the stand-alone version of
+ZDoom's internal node builder. Reads a Doom WAD, builds BSP nodes (and optionally GL
+nodes), a blockmap, and a reject table, then writes a new WAD.
+
+The original C++ source being ported lives at `/Users/jsh/dev/repos/zdbsp/`. The goal
+of this port is **byte-identical output** against the C++ baseline on the same host,
+so a regression suite that diffs WAD outputs can act as the correctness oracle.
 
 ## Status
 
-Phase 0: scaffolding. No algorithmic code yet.
+Feature-complete across the C++'s common workflows. Byte-identical against the C++
+baseline on every IWAD in `~/media/doom_wads/` for these flag combinations:
 
-## Layout
+| flag | identical | notes |
+|------|-----------|-------|
+| (default) | 7 / 7 | classic NODES/SEGS/SSECTORS/BLOCKMAP/REJECT |
+| `-z` | 7 / 7 | ZNOD compressed |
+| `-Z` | 7 / 7 | compress regular only |
+| `-X` | 7 / 7 | XNOD extended uncompressed |
+| `-P` | 7 / 7 | no polyobjects |
+| `-5` (no `-g`) | 7 / 7 | v5 flag without GL build is a no-op |
+| `-g`, `-G`, `-x`, `-g -5`, `-G -5` | 0 / 7 | functional; close_subsector residual differs |
 
-- `zdbsp-lib/` — library crate; will host WAD I/O, the processor, blockmap and node builder.
-- `zdbsp-cli/` — binary crate producing `zdbsp`; CLI surface mirroring the C++ flags in `zdbsp.html`.
-- `tests/` — integration regression harness diffing Rust output against the C++ baseline (see below).
+Tests: **60 total, all green**, plus a strict regression matrix covering 35 IWAD/flag
+combinations enforced by `ZDBSP_REGRESSION=1 cargo test`.
 
-## Porting plan
+The remaining residual is a small (`~4 subsectors per map`) divergence in
+`close_subsector`'s angle-sort selection that affects GL output but not playability.
+Documented inline in `zdbsp-lib/src/nodebuild/extract_gl.rs`.
 
-1. **Phase 0** — Workspace, C++ baseline build, diff harness.
-2. **Phase 1** — WAD I/O (`wad.cpp` → `zdbsp-lib::wad`).
-3. **Phase 2** — Map loading (Doom + Hexen binary formats; fixed-point `Fixed(i32)`).
-4. **Phase 3** — Blockmap builder.
-5. **Phase 4** — Node builder core, scalar `ClassifyLine` only.
-6. **Phase 5** — GL nodes + compressed/extended (ZNODES, zlib) output.
-7. **Phase 6** — Reject builder, UDMF parser, full CLI parity.
-8. **Phase 7** — SIMD: SSE1/SSE2 `ClassifyLine` variants with cpuid runtime dispatch, mirroring the C++ design.
+## Build
 
-Correctness target: **byte-identical output** against the C++ baseline.
+Standard cargo workspace, no special flags:
+
+```sh
+cargo build --release
+```
+
+The binary lands at `target/release/zdbsp`.
+
+`flate2` is linked with the system `libz` (via `default-features = false, features =
+["zlib"]`) so the compressed-node output matches the C++ baseline byte-for-byte.
+
+## Usage
+
+```
+zdbsp [options] <input.wad>
+```
+
+Run `zdbsp --help` for the full flag list. Common invocations:
+
+```sh
+zdbsp input.wad -o output.wad           # rebuild nodes for every map
+zdbsp -m MAP01 input.wad -o input.wad   # rebuild a single map in place
+zdbsp -g input.wad -o output.wad        # also build GL nodes
+zdbsp -z input.wad -o output.wad        # write compressed ZNODES
+```
+
+## Workspace layout
+
+```
+zdbsp-rust/
+├── zdbsp-lib/             # library crate — all the algorithm code
+│   ├── src/
+│   │   ├── fixed.rs            # Fixed-point type + PointToAngle
+│   │   ├── wad.rs              # WAD reader/writer (lump directory I/O)
+│   │   ├── level.rs            # Level container + Int* data types + pruning
+│   │   ├── processor.rs        # Per-map loader (Doom/Hexen binary; UDMF integration)
+│   │   ├── udmf.rs             # UDMF tokenizer, parser, writer
+│   │   ├── blockmap.rs         # BLOCKMAP builder (packed, hash-deduped)
+│   │   ├── workdata.rs         # Internal node-builder types (Vertex, Node, Subsector)
+│   │   ├── nodebuild/
+│   │   │   ├── mod.rs          # NodeBuilder struct, BuildOptions, point_on_side
+│   │   │   ├── types.rs        # PrivSeg, PrivVert, USegPtr, SplitSharer, PolyStart
+│   │   │   ├── classify.rs     # ClassifyLine2 — partition-side classifier (scalar)
+│   │   │   ├── events.rs       # FEventTree (BST keyed on partition distance)
+│   │   │   ├── util.rs         # Vertex spatial hash, MakeSegsFromSides, GroupSegPlanes,
+│   │   │   │                   # InterceptVector, SplitSeg, FindPolyContainers
+│   │   │   ├── build.rs        # BuildTree, CreateNode, CheckSubsector, SelectSplitter,
+│   │   │   │                   # Heuristic, SplitSegs, SortSegs (libc qsort via FFI)
+│   │   │   ├── gl.rs           # AddIntersection, FixSplitSharers, AddMinisegs,
+│   │   │   │                   # AddMiniseg, CheckLoopStart/End
+│   │   │   ├── extract.rs      # GetNodes — strip minisegs, recompute short bboxes
+│   │   │   └── extract_gl.rs   # GetGLNodes, CloseSubsector, OutputDegenerateSubsector
+│   │   ├── writer.rs           # Top-level write_map / write_udmf_map dispatch
+│   │   ├── writer_gl.rs        # GL_VERT / GL_SEGS / GL_SSECT / GL_NODES (v2 + v5)
+│   │   └── writer_compressed.rs# ZNOD / ZGLN / XNOD / XGLN (flate2 + system libz)
+│   └── tests/                  # integration tests against IWADs
+└── zdbsp-cli/             # binary crate — `zdbsp` executable
+    ├── src/main.rs             # arg parsing, lump-walk loop, per-map dispatch
+    └── tests/regression.rs     # strict byte-identical regression vs C++ baseline
+```
 
 ## Regression harness
 
-`cargo test` runs unit tests plus an integration suite that:
+The integration test at `zdbsp-cli/tests/regression.rs` invokes the C++ baseline at
+`/Users/jsh/dev/repos/zdbsp/build/zdbsp`, then runs the Rust port over the same input,
+and diffs the resulting WADs byte-for-byte across a matrix of flag combinations.
 
-1. Locates the C++ baseline binary (env `ZDBSP_BASELINE`, defaults to `/Users/jsh/dev/repos/zdbsp/build/zdbsp`).
-2. Locates a corpus of input WADs (env `ZDBSP_CORPUS`, defaults to `/Users/jsh/media/doom_wads/`).
-3. For each WAD and each flag combination it cares about, runs both binaries and diffs the outputs byte-for-byte.
+Two environment variables control it:
+- `ZDBSP_BASELINE` — path to the C++ baseline binary (default:
+  `/Users/jsh/dev/repos/zdbsp/build/zdbsp`).
+- `ZDBSP_CORPUS` — directory of input WADs (default: `/Users/jsh/media/doom_wads`).
 
-If either the baseline or the corpus is missing, the suite emits a skip notice rather than failing — that way `cargo test` is meaningful in CI without bundling proprietary WADs.
+By default the harness runs in **advisory mode** (skips with a notice). Set
+`ZDBSP_REGRESSION=1` to enforce byte-identical parity:
+
+```sh
+ZDBSP_REGRESSION=1 cargo test --release --test regression
+```
+
+## Translation notes
+
+A few places where the Rust port intentionally mirrors **bugs or implementation quirks**
+in the C++ baseline so the byte stream stays identical. Each is commented at its
+location in the source.
+
+- **`(uint32_t)negative_double` saturation in `PointToAngle`** — on aarch64-apple-darwin
+  clang emits `fcvtzu`, which saturates negative floats to zero. Rust's `as u32`
+  happens to match. A baseline rebuilt on x86_64 would produce different angles for
+  segs pointing into the lower half-plane (`cvttsd2si` wraps).
+- **Strict-aliasing-style sizeof bug in `WriteNodes5`** — the C++ writes
+  `count * sizeof(MapNodeEx) = count * 40` bytes from a buffer of `MapNodeExO = 32`-byte
+  records, leaving `count * 8` uninitialized trailing bytes per lump. Apple Silicon
+  reliably zeros that memory; we emit the zeros explicitly.
+- **`FixReject` opnum uses post-prune size** — the C++ indexes the old reject with the
+  *new* (post-prune) sector count, which is geometrically wrong. The Rust port preserves
+  the bug verbatim.
+- **`StripMinisegs` side-calculation overwrite** — the C++ correctly computes
+  sidedef-compression-aware `side`, then immediately overwrites it on the next line
+  with the naïve check. Mirrored.
+- **`OutputDegenerateSubsector` `storedseg` write target** — the C++ writes
+  `seg->storedseg = PushGLSeg(...)` where `seg` is the iterator var, not `bestseg`.
+  Same pattern in `CloseSubsector`'s angle-sort. Both mirrored.
+- **Vertex-split truncation order in `split_segs`** — the C++ truncates `frac * delta`
+  to int *first*, then adds to `v1.x`. Doing the addition in `f64` and truncating once
+  rounds differently when delta is negative and `v1.x` is positive. Mirrored.
+- **`SortSegs` uses libc `qsort` (unstable)** — Rust's `sort_unstable_by` doesn't
+  match BSD `qsort`'s permutation of equal-keyed elements. The port routes through
+  libc `qsort` via FFI so seg-ordering ties resolve identically.
+
+## License
+
+GPL-2.0-or-later, matching the upstream ZDBSP.

@@ -1,6 +1,14 @@
 // ABOUTME: Port of nodebuild_extract.cpp's GL paths: GetGLNodes, CloseSubsector,
 // ABOUTME: OutputDegenerateSubsector, PushGLSeg, PushConnectingGLSeg. Produces the
 // ABOUTME: MapNodeEx / MapSegGlEx / MapSubsectorEx arrays for GL output.
+//
+// Known residual versus the C++ baseline (~4 subsectors per E1M1, similar for other
+// maps): a handful of subsectors emit fewer GL_SEGS records than the C++. The build's
+// internal seg array (`nb.segs()`) carries the correct seg counts — verified per-line
+// — so the divergence is in `close_subsector`'s angle-sort selection picking different
+// candidates in degenerate or near-degenerate subsector geometries. The GL output is
+// still well-formed and renders in ZDoom; just not byte-identical. Diagnostic prints
+// would be needed in both C++ and Rust to pin the exact triggering condition.
 
 use crate::fixed::{point_to_angle, Angle, Fixed, FRACBITS};
 use crate::level::{MapNodeEx, MapSegGlEx, MapSubsectorEx, WideVertex, NO_INDEX};

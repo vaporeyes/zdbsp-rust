@@ -33,6 +33,54 @@ struct Args {
     aa_preference: Option<i32>,
 }
 
+fn print_help() {
+    print!(
+        "ZDBSP-rust 0.1.0 — Rust port of ZDoom's node builder
+
+Usage: zdbsp [options] <input.wad>
+
+Output:
+  -o, --output=FILE        Write to FILE (default: tmp.wad)
+  -m, --map=MAP            Process only the named map (e.g. E1M1, MAP01)
+  -V, --version            Print version and exit
+  -h, --help               Print this message and exit
+
+Node builder:
+  -N, --no-nodes           Do not build nodes; copy existing NODES/SEGS/SSECTORS
+  -q, --no-prune           Keep unreferenced sides/sectors
+  -g, --gl                 Also build GL nodes (writes GL_VERT/GL_SEGS/GL_SSECT/GL_NODES)
+  -G, --gl-matching        Build GL nodes once; derive regular nodes from the same build
+  -x, --gl-only            Build only GL nodes; regular lumps are emitted empty
+  -5, --gl-v5              Force v5 GL node record layout (also auto-promoted on large maps)
+
+Compression / extended formats:
+  -z, --compress           Force ZNOD/ZGL* (zlib-compressed extended) output
+  -Z, --compress-normal    Compress only the regular NODES; leave GL uncompressed
+  -X, --extended           Force XNOD/XGL* (uncompressed extended) output
+
+Reject:
+  -r, --empty-reject       Emit a zero-length REJECT lump
+  -R, --zero-reject        Emit a REJECT filled with zero bytes
+  -e, --full-reject        Rebuild REJECT (UNSUPPORTED; warns and falls back to --no-reject)
+  -E, --no-reject          Copy REJECT through unchanged (default)
+
+Blockmap:
+  -b, --empty-blockmap     Emit a zero-length BLOCKMAP lump (game will rebuild)
+
+Polyobjects:
+  -P, --no-polyobjs        Do not look for polyobject containers during partition selection
+
+UDMF (text-format maps):
+  -c, --comments           Annotate UDMF blocks with `// <index>` comments
+
+Build heuristics:
+  -p, --partition=N        Split a node when its set exceeds N segs (default: 64, min: 3)
+  -s, --split-cost=N       Score penalty per split when picking a partition (default: 8, min: 1)
+  -d, --diagonal-cost=N    Axis-aligned splitter preference weight (default: 16, min: 1)
+"
+    );
+}
+
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         output: PathBuf::from("tmp.wad"),
@@ -144,6 +192,9 @@ fn parse_args() -> Result<Args, String> {
             a.aa_preference = Some(n.max(1));
         } else if arg == "--version" || arg == "-V" {
             println!("ZDBSP-rust 0.1.0");
+            std::process::exit(0);
+        } else if arg == "--help" || arg == "-h" {
+            print_help();
             std::process::exit(0);
         } else if arg.starts_with('-') {
             return Err(format!("unsupported flag: {arg}"));
@@ -338,6 +389,7 @@ fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!("zdbsp: {e}");
+            eprintln!("Try `zdbsp --help' for more information.");
             return ExitCode::from(2);
         }
     };
