@@ -10,17 +10,21 @@ use crate::writer::NF_SUBSECTOR;
 
 /// GL_VERT v2 magic.
 const GL_VERT_MAGIC_V2: [u8; 4] = *b"gNd2";
+/// GL_VERT v5 magic.
+const GL_VERT_MAGIC_V5: [u8; 4] = *b"gNd5";
 
 /// Write GL_VERT: 4 magic bytes followed by `(x, y)` fixed-point pairs for the
 /// builder-added vertices only (indices `[num_org_verts, vertices.len())`).
+/// The `v5` flag swaps the magic from "gNd2" to "gNd5"; record layout is identical.
 pub fn write_gl_vertices(
     out: &mut WadWriter,
     vertices: &[WideVertex],
     num_org_verts: usize,
+    v5: bool,
 ) -> io::Result<()> {
     let added = &vertices[num_org_verts.min(vertices.len())..];
     let mut buf = Vec::with_capacity(4 + added.len() * 8);
-    buf.extend_from_slice(&GL_VERT_MAGIC_V2);
+    buf.extend_from_slice(if v5 { &GL_VERT_MAGIC_V5 } else { &GL_VERT_MAGIC_V2 });
     for v in added {
         buf.extend_from_slice(&v.x.to_le_bytes());
         buf.extend_from_slice(&v.y.to_le_bytes());
@@ -73,6 +77,81 @@ pub fn write_gl_ssect(out: &mut WadWriter, subs: &[MapSubsectorEx]) -> io::Resul
         buf.extend_from_slice(&(s.firstline as u16).to_le_bytes());
     }
     out.write_lump("GL_SSECT", &buf)
+}
+
+/// Write GL_SEGS in v5 format. Layout matches `MapSegGLEx` with its natural alignment:
+///   u32 v1, u32 v2 (high bit 0x80000000 = builder-added vertex offset)  — 8 bytes
+///   u32 linedef (zero-extended from the 16-bit value the C++ writes)    — 4 bytes
+///   u16 side, 2 bytes of padding, u32 partner                           — 8 bytes
+/// Total = 20 bytes per record. The C++ relies on `new MapSegGLEx[]` happening to
+/// land on a zero page so the alignment padding ends up as zero; we emit zeros
+/// explicitly to keep the output deterministic and byte-identical.
+pub fn write_gl_segs_v5(
+    out: &mut WadWriter,
+    segs: &[MapSegGlEx],
+    num_org_verts: u32,
+) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(segs.len() * 20);
+    for s in segs {
+        let v1 = if s.v1 < num_org_verts {
+            s.v1
+        } else {
+            0x80000000 | (s.v1 - num_org_verts)
+        };
+        let v2 = if s.v2 < num_org_verts {
+            s.v2
+        } else {
+            0x80000000 | (s.v2 - num_org_verts)
+        };
+        buf.extend_from_slice(&v1.to_le_bytes());
+        buf.extend_from_slice(&v2.to_le_bytes());
+        // C++: `LittleShort(linedef)` assigned to a DWORD slot zero-extends to 4 bytes.
+        buf.extend_from_slice(&(s.linedef as u16 as u32).to_le_bytes());
+        buf.extend_from_slice(&s.side.to_le_bytes());
+        buf.extend_from_slice(&[0, 0]); // alignment padding before `partner`
+        buf.extend_from_slice(&s.partner.to_le_bytes());
+    }
+    out.write_lump("GL_SEGS", &buf)
+}
+
+/// Write GL_SSECT in v5 format (8 bytes per record: u32 numlines, u32 firstline).
+pub fn write_gl_ssect_v5(out: &mut WadWriter, subs: &[MapSubsectorEx]) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(subs.len() * 8);
+    for s in subs {
+        buf.extend_from_slice(&s.numlines.to_le_bytes());
+        buf.extend_from_slice(&s.firstline.to_le_bytes());
+    }
+    out.write_lump("GL_SSECT", &buf)
+}
+
+/// Write GL_NODES in v5 format. Per-record layout matches `MapNodeExO` (32 bytes):
+///   i16 x, y, dx, dy      (8 bytes)
+///   i16 bbox[2][4]        (16 bytes)
+///   u32 children[2]       (8 bytes)
+///
+/// **Bug-mirror**: the C++ `WriteNodes5` allocates `MapNodeExO[count * sizeof(MapNodeEx)]`
+/// but only `WriteLump`s `count * sizeof(MapNodeEx) = count * 40` bytes — leaving
+/// `count * 8` uninitialized trailing bytes per lump. On Apple Silicon those bytes
+/// are reliably zero (fresh-page heap), so the output is observable as 32 valid bytes
+/// plus 8 zero bytes per record. We emit them explicitly so the result is deterministic.
+pub fn write_gl_nodes_v5(out: &mut WadWriter, nodes: &[MapNodeEx]) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(nodes.len() * 40);
+    for n in nodes {
+        buf.extend_from_slice(&((n.x >> FRACBITS) as i16).to_le_bytes());
+        buf.extend_from_slice(&((n.y >> FRACBITS) as i16).to_le_bytes());
+        buf.extend_from_slice(&((n.dx >> FRACBITS) as i16).to_le_bytes());
+        buf.extend_from_slice(&((n.dy >> FRACBITS) as i16).to_le_bytes());
+        for j in 0..2 {
+            for k in 0..4 {
+                buf.extend_from_slice(&n.bbox[j][k].to_le_bytes());
+            }
+        }
+        buf.extend_from_slice(&n.children[0].to_le_bytes());
+        buf.extend_from_slice(&n.children[1].to_le_bytes());
+    }
+    // Trailing "garbage" — see doc comment above.
+    buf.extend(std::iter::repeat(0u8).take(nodes.len() * 8));
+    out.write_lump("GL_NODES", &buf)
 }
 
 /// Write GL_NODES in v2 format (28 bytes per record; same shape as regular NODES).

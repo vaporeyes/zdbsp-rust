@@ -65,6 +65,14 @@ pub struct WriterOptions {
     pub force_compression: bool,
     /// UDMF-only: write `// <idx>` annotations into each block.
     pub write_comments: bool,
+    /// `-x`: build only GL nodes and skip the regular tree's lump emission.
+    pub gl_only: bool,
+    /// `-G`: derive regular nodes from the GL build instead of doing two builds.
+    /// The CLI is responsible for performing the single build; the writer side just
+    /// emits both outputs from the same builder's data.
+    pub conform_nodes: bool,
+    /// `-5`: force v5 GL output formats.
+    pub v5_gl_nodes: bool,
 }
 
 impl Default for WriterOptions {
@@ -78,6 +86,9 @@ impl Default for WriterOptions {
             compress_gl_nodes: false,
             force_compression: false,
             write_comments: false,
+            gl_only: false,
+            conform_nodes: false,
+            v5_gl_nodes: false,
         }
     }
 }
@@ -166,12 +177,19 @@ pub fn write_map(
 
     // Decide compression flags using the same thresholds as processor.cpp:734-753.
     let has_gl = gl_nodes.is_some();
+    let gl5 = has_gl && {
+        let gl = gl_nodes.unwrap();
+        opts.v5_gl_nodes
+            || gl.vertices.len() > 32767
+            || gl.segs.len() > 65534
+            || gl.nodes.len() > 32767
+            || gl.subsectors.len() > 32767
+    };
     let mut compress_gl = if has_gl {
         opts.compress_gl_nodes || nodes.vertices.len() > 32767
     } else {
         false
     };
-    let _ = compress_gl;
     let compress = opts.compress_nodes
         || compress_gl
         || nodes.vertices.len() > 65535
@@ -189,17 +207,33 @@ pub fn write_map(
     write_lines(out, level, extended)?;
     write_sides(out, level)?;
     // For compressed (or GL-only) output, VERTEXES holds only original verts; the new
-    // ones live in ZNODES / GL_VERT / etc.
-    let vert_count = if compress { num_org_verts as usize } else { nodes.vertices.len() };
-    write_vertices_count(out, &nodes.vertices, vert_count)?;
+    // ones live in ZNODES / GL_VERT / etc. C++ formula:
+    //   `compress || GLOnly ? NumOrgVerts : NumVertices`.
+    // When `gl_only`, the regular `nodes` array is empty — pull vertices from the GL
+    // builder instead so the count matches the C++ output.
+    let vertex_src: &[crate::level::WideVertex] = if opts.gl_only {
+        gl_nodes.map(|g| g.vertices.as_slice()).unwrap_or(&nodes.vertices)
+    } else {
+        &nodes.vertices
+    };
+    let vert_count = if compress || opts.gl_only {
+        num_org_verts as usize
+    } else {
+        vertex_src.len()
+    };
+    write_vertices_count(out, vertex_src, vert_count)?;
 
     if opts.build_nodes {
         if !compress {
-            write_segs(out, &nodes.segs)?;
-            // SSECTORS lump: empty label only when compress_gl forces ZGLN here.
-            // Without compression we always emit the normal subsector array.
-            write_ssectors(out, &nodes.subsectors)?;
-            write_nodes(out, &nodes.nodes)?;
+            if opts.gl_only {
+                out.create_label("SEGS")?;
+                out.create_label("SSECTORS")?;
+                out.create_label("NODES")?;
+            } else {
+                write_segs(out, &nodes.segs)?;
+                write_ssectors(out, &nodes.subsectors)?;
+                write_nodes(out, &nodes.nodes)?;
+            }
         } else {
             out.create_label("SEGS")?;
             if compress_gl {
@@ -233,7 +267,9 @@ pub fn write_map(
             } else {
                 out.create_label("SSECTORS")?;
             }
-            if opts.force_compression {
+            if opts.gl_only {
+                out.create_label("NODES")?;
+            } else if opts.force_compression {
                 wcomp::write_bspz(
                     out,
                     "NODES",
@@ -279,10 +315,16 @@ pub fn write_map(
                 label.push(c);
             }
             out.create_label(&label)?;
-            wgl::write_gl_vertices(out, &gl.vertices, num_org_verts as usize)?;
-            wgl::write_gl_segs(out, &gl.segs, num_org_verts)?;
-            wgl::write_gl_ssect(out, &gl.subsectors)?;
-            wgl::write_gl_nodes(out, &gl.nodes)?;
+            wgl::write_gl_vertices(out, &gl.vertices, num_org_verts as usize, gl5)?;
+            if gl5 {
+                wgl::write_gl_segs_v5(out, &gl.segs, num_org_verts)?;
+                wgl::write_gl_ssect_v5(out, &gl.subsectors)?;
+                wgl::write_gl_nodes_v5(out, &gl.nodes)?;
+            } else {
+                wgl::write_gl_segs(out, &gl.segs, num_org_verts)?;
+                wgl::write_gl_ssect(out, &gl.subsectors)?;
+                wgl::write_gl_nodes(out, &gl.nodes)?;
+            }
         }
     }
 

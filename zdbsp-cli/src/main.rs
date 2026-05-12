@@ -23,6 +23,9 @@ struct Args {
     compress_gl_nodes: bool,
     force_compression: bool,
     write_comments: bool,
+    gl_only: bool,
+    conform_nodes: bool,
+    v5_gl_nodes: bool,
     reject_mode: RejectMode,
     blockmap_mode: BlockmapMode,
     max_segs: Option<i32>,
@@ -62,6 +65,19 @@ fn parse_args() -> Result<Args, String> {
         } else if arg == "-g" || arg == "--gl" {
             // C++ main.cpp:377-380.
             a.build_gl_nodes = true;
+            a.conform_nodes = false;
+        } else if arg == "-G" || arg == "--gl-matching" {
+            // C++ main.cpp:381-384: build GL once, derive regular from it.
+            a.build_gl_nodes = true;
+            a.conform_nodes = true;
+        } else if arg == "-x" || arg == "--gl-only" {
+            // C++ main.cpp:400-404: GL nodes only.
+            a.gl_only = true;
+            a.build_gl_nodes = true;
+            a.conform_nodes = false;
+        } else if arg == "-5" || arg == "--gl-v5" {
+            // C++ main.cpp:405-407.
+            a.v5_gl_nodes = true;
         } else if arg == "-z" || arg == "--compress" {
             // C++ main.cpp:390-394: compress both, force ZLib output.
             a.compress_nodes = true;
@@ -159,6 +175,9 @@ fn run(args: Args) -> Result<(), String> {
         compress_gl_nodes: args.compress_gl_nodes,
         force_compression: args.force_compression,
         write_comments: args.write_comments,
+        gl_only: args.gl_only,
+        conform_nodes: args.conform_nodes,
+        v5_gl_nodes: args.v5_gl_nodes,
     };
 
     // Build-time tunables for the NodeBuilder. None means "leave default".
@@ -199,9 +218,17 @@ fn run(args: Args) -> Result<(), String> {
             let mut processor = Processor::load(&mut reader, lump, args.no_prune)
                 .map_err(|e| format!("load {map_name}: {e}"))?;
 
-            // GL build (optional). Mirrors processor.cpp:617-636: build GL first, then
-            // throw away the builder and load again for the regular build.
-            let (gl_out, gl_num_org) = if args.build_nodes && args.build_gl_nodes {
+            // Build dispatch matrix mirroring processor.cpp:601-643:
+            //
+            // | flags          | builds | extracts |
+            // |----------------|--------|----------|
+            // | (default)      | reg    | reg      |
+            // | -g             | gl, reg| reg, gl  |  (two builds)
+            // | -G  (conform)  | gl     | reg, gl  |  (one build, derive regular)
+            // | -x  (gl_only)  | gl     | gl       |  (one build, no regular)
+            let (gl_out, nodes, final_num_org) = if !args.build_nodes {
+                (None, zdbsp_lib::nodebuild::extract::NodeOutput::default(), 0u32)
+            } else if args.conform_nodes && args.build_gl_nodes {
                 let (starts, anchors) = if args.check_polyobjs {
                     collect_poly_spots(&processor.level)
                 } else {
@@ -211,21 +238,41 @@ fn run(args: Args) -> Result<(), String> {
                 nb.options = build_opts;
                 nb.build();
                 let num_org = nb.initial_vertex_count() as u32;
-                let extracted = nb.extract_gl();
-                (Some(extracted), num_org)
-            } else {
-                (None, 0)
-            };
-
-            // Reload the level for the regular build so the vertex array starts fresh.
-            // (The GL build mutated processor.level.lines to reference the GL builder's
-            // vertex indices.)
-            if args.build_gl_nodes && args.build_nodes {
+                // Order matters — extract_nodes() relies on `stored_seg` being unset,
+                // which extract_gl() writes to.
+                let reg = nb.extract_nodes();
+                let gl = nb.extract_gl();
+                processor.level.vertices = reg.vertices.clone();
+                (Some(gl), reg, num_org)
+            } else if args.gl_only && args.build_gl_nodes {
+                let (starts, anchors) = if args.check_polyobjs {
+                    collect_poly_spots(&processor.level)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                let mut nb = NodeBuilder::new(&mut processor.level, starts, anchors, &map_name, true);
+                nb.options = build_opts;
+                nb.build();
+                let num_org = nb.initial_vertex_count() as u32;
+                let gl = nb.extract_gl();
+                processor.level.vertices = gl.vertices.clone();
+                (Some(gl), zdbsp_lib::nodebuild::extract::NodeOutput::default(), num_org)
+            } else if args.build_gl_nodes {
+                // -g: two builds. GL build → regular build (fresh reload).
+                let (gl_out, _gl_num_org) = {
+                    let (starts, anchors) = if args.check_polyobjs {
+                        collect_poly_spots(&processor.level)
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    let mut nb = NodeBuilder::new(&mut processor.level, starts, anchors, &map_name, true);
+                    nb.options = build_opts;
+                    nb.build();
+                    let n = nb.initial_vertex_count() as u32;
+                    (nb.extract_gl(), n)
+                };
                 processor = Processor::load(&mut reader, lump, args.no_prune)
                     .map_err(|e| format!("reload {map_name}: {e}"))?;
-            }
-
-            let (nodes, num_org_verts) = if args.build_nodes {
                 let (starts, anchors) = if args.check_polyobjs {
                     collect_poly_spots(&processor.level)
                 } else {
@@ -235,16 +282,23 @@ fn run(args: Args) -> Result<(), String> {
                 nb.options = build_opts;
                 nb.build();
                 let num_org = nb.initial_vertex_count() as u32;
-                let out = nb.extract_nodes();
-                // Mirror processor.cpp:598-599: replace Level.Vertices with the builder's
-                // expanded array so the blockmap rebuild reads the right coords.
-                processor.level.vertices = out.vertices.clone();
-                (out, num_org)
+                let reg = nb.extract_nodes();
+                processor.level.vertices = reg.vertices.clone();
+                (Some(gl_out), reg, num_org)
             } else {
-                (zdbsp_lib::nodebuild::extract::NodeOutput::default(), 0)
+                let (starts, anchors) = if args.check_polyobjs {
+                    collect_poly_spots(&processor.level)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                let mut nb = NodeBuilder::new(&mut processor.level, starts, anchors, &map_name, false);
+                nb.options = build_opts;
+                nb.build();
+                let num_org = nb.initial_vertex_count() as u32;
+                let reg = nb.extract_nodes();
+                processor.level.vertices = reg.vertices.clone();
+                (None, reg, num_org)
             };
-
-            let final_num_org = if gl_out.is_some() { gl_num_org } else { num_org_verts };
 
             writer::write_map(
                 &mut out,
